@@ -235,7 +235,7 @@ class ImageFolderDataset(Dataset):
 
             for folder in folder_list:
                 rgb_list = sorted(os.listdir(folder))
-                rgb_file_name_list = [os.path.join(folder, n) for n in rgb_list]
+                rgb_file_name_list = [os.path.join(folder, n) for n in rgb_list if 'json' not in n]
                 all_img_list.extend(rgb_file_name_list)
                 all_mask_list.extend(rgb_list)
 
@@ -288,6 +288,8 @@ class ImageFolderDataset(Dataset):
                 or self.data_camera_mode == 'shapenet_motorbike' or self.data_camera_mode == 'ts_house' or self.data_camera_mode == 'ts_animal' \
                 :
             ori_img = cv2.imread(fname, cv2.IMREAD_UNCHANGED)
+            if ori_img is None:
+                print(fname)
             img = ori_img[:, :, :3][..., ::-1]
             mask = ori_img[:, :, 3:4]
             condinfo = np.zeros(2)
@@ -300,7 +302,8 @@ class ImageFolderDataset(Dataset):
                     or self.data_camera_mode == 'renderpeople' or self.data_camera_mode == 'shapenet_motorbike' \
                     or self.data_camera_mode == 'ts_house' or self.data_camera_mode == 'ts_animal':
                 if not os.path.exists(os.path.join(self.camera_root, syn_idx, obj_idx, 'rotation.npy')):
-                    print('==> not found camera root')
+                    camera_path = os.path.join(self.camera_root, syn_idx, obj_idx, 'rotation.npy')
+                    print(f'==> not found camera root: {camera_path}')
                 else:
                     rotation_camera = np.load(os.path.join(self.camera_root, syn_idx, obj_idx, 'rotation.npy'))
                     elevation_camera = np.load(os.path.join(self.camera_root, syn_idx, obj_idx, 'elevation.npy'))

@@ -1,1 +1,12 @@
 .DS_Store
+**/tmp/
+**/**/*.pyc
+**/**/*.out
+out/
+**/**/shapenet-data/**
+**/**/shapenet-data-maybebug/**
+*.vscode/
+cache/
+data/
+**/**/batchscript*
+wandb/

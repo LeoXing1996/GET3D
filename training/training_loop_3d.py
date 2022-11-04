@@ -106,6 +106,8 @@ def training_loop(
         inference_vis=False,  # Whether running inference or not.
         detect_anomaly=False,
         resume_pretrain=None,
+        slurm=False,
+        no_wandb=False,  # TODO
 ):
     from torch_utils.ops import upfirdn2d
     from torch_utils.ops import bias_act
@@ -237,8 +239,13 @@ def training_loop(
     if rank == 0:
         stats_jsonl = open(os.path.join(run_dir, 'stats.jsonl'), 'wt')
         try:
-            import torch.utils.tensorboard as tensorboard
-            stats_tfevents = tensorboard.SummaryWriter(run_dir)
+            if not no_wandb:
+                import wandb
+                wandb.init(project='GET3D', name=os.path.basename(run_dir))
+                stats_tfevents = 'wandb'
+            else:
+                import torch.utils.tensorboard as tensorboard
+                stats_tfevents = tensorboard.SummaryWriter(run_dir)
         except ImportError as err:
             print('Skipping tfevents export:', err)
 
@@ -362,14 +369,17 @@ def training_loop(
                 print('Aborting...')
 
         # Save image snapshot.
+        image_snapshot_ticks = 1
         if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0) and (
                 not detect_anomaly):
             with torch.no_grad():
                 print('==> start visualization')
+
                 save_visualization(
                     G_ema, grid_z, grid_c, run_dir, cur_nimg, grid_size, cur_tick,
                     image_snapshot_ticks,
                     save_all=(cur_tick % (image_snapshot_ticks * 4) == 0) and training_set.resolution < 512,
+                    use_wandb=not no_wandb
                 )
                 print('==> saved visualization')
 
@@ -433,11 +443,23 @@ def training_loop(
         if stats_tfevents is not None:
             global_step = int(cur_nimg / 1e3)
             walltime = timestamp - start_time
-            for name, value in stats_dict.items():
-                stats_tfevents.add_scalar(name, value.mean, global_step=global_step, walltime=walltime)
-            for name, value in stats_metrics.items():
-                stats_tfevents.add_scalar(f'Metrics/{name}', value, global_step=global_step, walltime=walltime)
-            stats_tfevents.flush()
+            if stats_tfevents == 'wandb':
+                for name, value in stats_dict.items():
+                    # wandb.log(value.mean, name, step=global_step)
+                    wandb.log({name: value.mean}, step=global_step)
+                for name, value in stats_metrics.items():
+                    # wandb.log(f'Metrics/{value.mean}', name, step=global_step)
+                    wandb.log({f'Metrics/{name}': value}, step=global_step)
+                # log ada prob, curr_nimg, tick
+                # if augment_pipe is not None:
+                #     wandb.log({'augment': float(augment_pipe.p.cpu())}, step=global_step)
+                wandb.log({'curr_nimg': cur_nimg, 'curr_tick': cur_tick}, step=global_step)
+            else:
+                for name, value in stats_dict.items():
+                    stats_tfevents.add_scalar(name, value.mean, global_step=global_step, walltime=walltime)
+                for name, value in stats_metrics.items():
+                    stats_tfevents.add_scalar(f'Metrics/{name}', value, global_step=global_step, walltime=walltime)
+                stats_tfevents.flush()
         if progress_fn is not None:
             progress_fn(cur_nimg // 1000, total_kimg)
 

@@ -18,7 +18,7 @@ import cv2
 from tqdm import tqdm
 
 
-def save_image_grid(img, fname, drange, grid_size):
+def save_image_grid(img, fname, drange, grid_size, use_wandb=False):
     lo, hi = drange
     img = np.asarray(img, dtype=np.float32)
     img = (img - lo) * (255 / (hi - lo))
@@ -37,10 +37,18 @@ def save_image_grid(img, fname, drange, grid_size):
             PIL.Image.fromarray(img[:, :, 0], 'L').save(fname)
         if C == 3:
             PIL.Image.fromarray(img, 'RGB').save(fname)
+        if use_wandb:
+            import wandb
+            wandb_img = wandb.Image(fname)
+            base_name = fname.split('/')[-1].split('.')[0]
+            camera_id = int(base_name.split('_')[1])
+            n_kimg = int(base_name.split('_')[2])
+            # wandb.log({f'fake_img_camera{camera_id}': wandb_img}, step=n_kimg)
+            print(f'fake_img_camera{camera_id}-step{n_kimg}')
     return img
 
 
-def save_3d_shape(mesh_v_list, mesh_f_list, root, idx):
+def save_3d_shape(mesh_v_list, mesh_f_list, root, idx, use_wandb=False):
     n_mesh = len(mesh_f_list)
     mesh_dir = os.path.join(root, 'mesh_pred')
     os.makedirs(mesh_dir, exist_ok=True)
@@ -49,6 +57,16 @@ def save_3d_shape(mesh_v_list, mesh_f_list, root, idx):
         mesh_f = mesh_f_list[i_mesh]
         mesh_name = os.path.join(mesh_dir, '%07d_%02d.obj' % (idx, i_mesh))
         save_obj(mesh_v, mesh_f, mesh_name)
+        if use_wandb:
+            import wandb
+            n_kimg = idx // 100 * 10
+            if idx != 0:
+                # NOTE: only upload mesh-0 to wandb
+                continue
+            # with open(mesh_name, 'r') as obj:
+            #     wandb_obj = wandb.Object3D(obj)
+            # wandb.log({f'mesh_camera{i_mesh}': wandb_obj}, step=n_kimg)
+            print(f'mesh_camera{i_mesh}-step{n_kimg}')
 
 
 def gen_swap(ws_geo_list, ws_tex_list, camera, generator, save_path, gen_mesh=False, ):
@@ -150,6 +168,7 @@ def save_visualization(
         save_gif_name=None,
         save_all=True,
         grid_tex_z=None,
+        use_wandb=False,  # TODO:
 ):
     '''
     Save visualization during training
@@ -195,21 +214,24 @@ def save_visualization(
             if save_all:
                 img = save_image_grid(
                     images, None,
-                    drange=[-1, 1], grid_size=grid_size)
+                    drange=[-1, 1], grid_size=grid_size, use_wandb=False)
             else:
                 img = save_image_grid(
                     images, os.path.join(
                         run_dir,
                         f'{save_file_name}_{cur_nimg // 1000:06d}_{i_camera:02d}.png'),
-                    drange=[-1, 1], grid_size=grid_size)
+                    drange=[-1, 1], grid_size=grid_size, use_wandb=use_wandb)
             camera_img_list.append(img)
         if save_gif_name is None:
             save_gif_name = f'fakes_{cur_nimg // 1000:06d}.gif'
         if save_all:
             imageio.mimsave(os.path.join(run_dir, save_gif_name), camera_img_list)
+            if use_wandb:
+                # TODO: do not support save gif to wandb currently
+                pass
         n_shape = 10  # we only save 10 shapes to check performance
         if cur_tick % min((image_snapshot_ticks * 20), 100) == 0:
-            save_3d_shape(mesh_v_list[:n_shape], mesh_f_list[:n_shape], run_dir, cur_nimg // 100)
+            save_3d_shape(mesh_v_list[:n_shape], mesh_f_list[:n_shape], run_dir, cur_nimg // 100, use_wandb)
 
 
 def save_textured_mesh_for_inference(

@@ -5,7 +5,8 @@
 # and any modifications thereto.  Any use, reproduction, disclosure or
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION & AFFILIATES is strictly prohibited.
-
+from torch import distributed as dist
+from mmengine.dist import get_dist_info
 import os
 import click
 import re
@@ -25,7 +26,7 @@ def subprocess_fn(rank, c, temp_dir):
     dnnlib.util.Logger(file_name=os.path.join(c.run_dir, 'log.txt'), file_mode='a', should_flush=True)
 
     # Init torch.distributed.
-    if c.num_gpus > 1:
+    if c.num_gpus > 1 and not c.slurm:
         init_file = os.path.abspath(os.path.join(temp_dir, '.torch_distributed_init'))
         if os.name == 'nt':
             init_method = 'file:///' + init_file.replace('\\', '/')
@@ -49,39 +50,119 @@ def subprocess_fn(rank, c, temp_dir):
         training_loop_3d.training_loop(rank=rank, **c)
 
 
+def init_slurm_args(port=None):
+    import subprocess
+    proc_id = int(os.environ['SLURM_PROCID'])
+    ntasks = int(os.environ['SLURM_NTASKS'])
+    node_list = os.environ['SLURM_NODELIST']
+    num_gpus = torch.cuda.device_count()
+    torch.cuda.set_device(proc_id % num_gpus)
+    addr = subprocess.getoutput(
+        f'scontrol show hostname {node_list} | head -n1')
+    # specify master port
+    if port is not None:
+        os.environ['MASTER_PORT'] = str(port)
+    elif 'MASTER_PORT' in os.environ:
+        pass  # use MASTER_PORT in the environment variable
+    else:
+        # 29500 is torch.distributed default port
+        os.environ['MASTER_PORT'] = '29500'
+    # use MASTER_ADDR in the environment variable if it already exists
+    if 'MASTER_ADDR' not in os.environ:
+        os.environ['MASTER_ADDR'] = addr
+    os.environ['WORLD_SIZE'] = str(ntasks)
+    os.environ['LOCAL_RANK'] = str(proc_id % num_gpus)
+    os.environ['RANK'] = str(proc_id)
+    torch.distributed.init_process_group(backend='nccl')
+
+
 # ----------------------------------------------------------------------------
 
 def launch_training(c, desc, outdir, dry_run):
     dnnlib.util.Logger(should_flush=True)
 
-    # Pick output directory.
-    prev_run_dirs = []
-    if os.path.isdir(outdir):
-        prev_run_dirs = [x for x in os.listdir(outdir) if os.path.isdir(os.path.join(outdir, x))]
-    prev_run_ids = [re.match(r'^\d+', x) for x in prev_run_dirs]
-    prev_run_ids = [int(x.group()) for x in prev_run_ids if x is not None]
-    cur_run_id = max(prev_run_ids, default=-1) + 1
-    if c.inference_vis:
-        c.run_dir = os.path.join(outdir, 'inference')
+    if c.slurm:
+        init_slurm_args()
+        rank, ws = get_dist_info()
+        # get and make run_dir at rank 0
+        if rank == 0:
+            # Pick output directory.
+            prev_run_dirs = []
+            if os.path.isdir(outdir):
+                prev_run_dirs = [
+                    x for x in os.listdir(outdir)
+                    if os.path.isdir(os.path.join(outdir, x))
+                ]
+            prev_run_ids = [re.match(r'^\d+', x) for x in prev_run_dirs]
+            prev_run_ids = [
+                int(x.group()) for x in prev_run_ids if x is not None
+            ]
+            cur_run_id = max(prev_run_ids, default=-1) + 1
+            c.run_dir = os.path.join(outdir, f'{cur_run_id:05d}-{desc}')
+            assert not os.path.exists(c.run_dir)
+            print('Creating output directory...')
+            os.makedirs(c.run_dir)
+            with open(os.path.join(c.run_dir, 'training_options.json'),
+                      'wt') as f:
+                json.dump(c, f, indent=2)
+
+            dnnlib.util.Logger(file_name=os.path.join(c.run_dir, 'log.txt'),
+                               file_mode='a',
+                               should_flush=True)
+        dist.barrier()
+        # get run_dir and write to c.run_dir
+        prev_run_dirs = [
+            x for x in os.listdir(outdir)
+            if os.path.isdir(os.path.join(outdir, x))
+        ]
+        prev_run_ids = [re.match(r'^\d+', x) for x in prev_run_dirs]
+        prev_run_ids = [int(x.group()) for x in prev_run_ids if x is not None]
+        cur_run_id = max(prev_run_ids, default=-1)  # run dir made by rank0
+        c.run_dir = os.path.join(outdir, f'{cur_run_id:05d}-{desc}')
+
+        # get petrel dir
+        # bucket = c.bucket
+        # if bucket.endswith('/'):
+        #     bucket = bucket[:-1]
+        # c.petrel_dir = os.path.join(bucket, f'{cur_run_id:05d}-{desc}')
+        # c.petrel_mapping = {c.run_dir: c.petrel_dir}
+
     else:
+        prev_run_dirs = []
+        if os.path.isdir(outdir):
+            prev_run_dirs = [
+                x for x in os.listdir(outdir)
+                if os.path.isdir(os.path.join(outdir, x))
+            ]
+        prev_run_ids = [re.match(r'^\d+', x) for x in prev_run_dirs]
+        prev_run_ids = [int(x.group()) for x in prev_run_ids if x is not None]
+        cur_run_id = max(prev_run_ids, default=-1) + 1
         c.run_dir = os.path.join(outdir, f'{cur_run_id:05d}-{desc}')
         assert not os.path.exists(c.run_dir)
+        print('Creating output directory...')
+        os.makedirs(c.run_dir)
+        with open(os.path.join(c.run_dir, 'training_options.json'), 'wt') as f:
+            json.dump(c, f, indent=2)
 
     # Print options.
-    print()
-    print('Training options:')
-    print(json.dumps(c, indent=2))
-    print()
-    print(f'Output directory:    {c.run_dir}')
-    print(f'Number of GPUs:      {c.num_gpus}')
-    print(f'Batch size:          {c.batch_size} images')
-    print(f'Training duration:   {c.total_kimg} kimg')
-    print(f'Dataset path:        {c.training_set_kwargs.path}')
-    print(f'Dataset size:        {c.training_set_kwargs.max_size} images')
-    print(f'Dataset resolution:  {c.training_set_kwargs.resolution}')
-    print(f'Dataset labels:      {c.training_set_kwargs.use_labels}')
-    print(f'Dataset x-flips:     {c.training_set_kwargs.xflip}')
-    print()
+    if not c.slurm or (c.slurm and rank == 0):
+        print()
+        print('Training options:')
+        print(json.dumps(c, indent=2))
+        print()
+        print(f'Output directory:    {c.run_dir}')
+        print(f'Number of GPUs:      {c.num_gpus}')
+        print(f'Batch size:          {c.batch_size} images')
+        print(f'Training duration:   {c.total_kimg} kimg')
+        if hasattr(c.training_set_kwargs, 'path'):
+            print(f'Dataset path:        {c.training_set_kwargs.path}')
+        else:
+            print(f'Dataset name:        {c.training_set_kwargs.name}')
+        print(f'Dataset size:        {c.training_set_kwargs.max_size} images')
+        print(f'Dataset resolution:  {c.training_set_kwargs.resolution}')
+        print(f'Dataset labels:      {c.training_set_kwargs.use_labels}')
+        print(f'Dataset x-flips:     {c.training_set_kwargs.xflip}')
+        print()
 
     # Dry run?
     if dry_run:
@@ -89,20 +170,20 @@ def launch_training(c, desc, outdir, dry_run):
         return
 
     # Create output directory.
-    print('Creating output directory...')
-    if not os.path.exists(c.run_dir):
-        os.makedirs(c.run_dir)
-    with open(os.path.join(c.run_dir, 'training_options.json'), 'wt') as f:
-        json.dump(c, f, indent=2)
+    if not c.slurm or (c.slurm and rank == 0):
+        print('Launching processes...')
 
     # Launch processes.
-    print('Launching processes...')
-    torch.multiprocessing.set_start_method('spawn', force=True)
-    with tempfile.TemporaryDirectory() as temp_dir:
-        if c.num_gpus == 1:
-            subprocess_fn(rank=0, c=c, temp_dir=temp_dir)
-        else:
-            torch.multiprocessing.spawn(fn=subprocess_fn, args=(c, temp_dir), nprocs=c.num_gpus)
+    if c.slurm:
+        subprocess_fn(rank=rank, c=c, temp_dir=None)
+    elif c.num_gpus == 1:
+        subprocess_fn(rank=0, c=c, temp_dir=None)
+    else:
+        torch.multiprocessing.set_start_method('spawn')
+        with tempfile.TemporaryDirectory() as temp_dir:
+            torch.multiprocessing.spawn(fn=subprocess_fn,
+                                        args=(c, temp_dir),
+                                        nprocs=c.num_gpus)
 
 
 # ----------------------------------------------------------------------------
@@ -214,11 +295,16 @@ def parse_comma_separated_list(s):
 @click.option('--nobench', help='Disable cuDNN benchmarking', metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--workers', help='DataLoader worker processes', metavar='INT', type=click.IntRange(min=0), default=3, show_default=True)
 @click.option('-n', '--dry-run', help='Print training options and exit', is_flag=True)
+@click.option('--slurm',
+              is_flag=True,
+              default=False,
+              help='Whether run code in slurm mode.')
 def main(**kwargs):
     # Initialize config.
     print('==> start')
     opts = dnnlib.EasyDict(kwargs)  # Command line arguments.
     c = dnnlib.EasyDict()  # Main config dict.
+    c.slurm = opts.slurm
     c.G_kwargs = dnnlib.EasyDict(
         class_name=None, z_dim=opts.latent_dim, w_dim=opts.latent_dim, mapping_kwargs=dnnlib.EasyDict())
     c.D_kwargs = dnnlib.EasyDict(
