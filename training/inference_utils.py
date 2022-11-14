@@ -41,10 +41,9 @@ def save_image_grid(img, fname, drange, grid_size, use_wandb=False):
             import wandb
             wandb_img = wandb.Image(fname)
             base_name = fname.split('/')[-1].split('.')[0]
-            camera_id = int(base_name.split('_')[1])
-            n_kimg = int(base_name.split('_')[2])
-            # wandb.log({f'fake_img_camera{camera_id}': wandb_img}, step=n_kimg)
-            print(f'fake_img_camera{camera_id}-step{n_kimg}')
+            n_kimg = int(base_name.split('_')[1])
+            camera_id = int(base_name.split('_')[2])
+            wandb.log({f'fake_img_camera{camera_id}': wandb_img}, step=n_kimg)
     return img
 
 
@@ -60,13 +59,12 @@ def save_3d_shape(mesh_v_list, mesh_f_list, root, idx, use_wandb=False):
         if use_wandb:
             import wandb
             n_kimg = idx // 100 * 10
-            if idx != 0:
+            if i_mesh != 0:
                 # NOTE: only upload mesh-0 to wandb
                 continue
-            # with open(mesh_name, 'r') as obj:
-            #     wandb_obj = wandb.Object3D(obj)
-            # wandb.log({f'mesh_camera{i_mesh}': wandb_obj}, step=n_kimg)
-            print(f'mesh_camera{i_mesh}-step{n_kimg}')
+            with open(mesh_name, 'r') as obj:
+                wandb_obj = wandb.Object3D(obj)
+            wandb.log({f'mesh_camera{i_mesh}': wandb_obj}, step=n_kimg)
 
 
 def gen_swap(ws_geo_list, ws_tex_list, camera, generator, save_path, gen_mesh=False, ):
